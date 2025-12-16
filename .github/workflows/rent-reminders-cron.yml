@@ -2,9 +2,10 @@ name: Rent Reminders Cron
 
 on:
   schedule:
-    - cron: '20 0 * * *'
-    - cron: '30 0 * * *'
-    - cron: '0 14 * * *'
+    - cron: '5 0 * * *'   # 00:05 UTC — billing/status normalize
+    - cron: '20 0 * * *'  # 00:20 UTC — trigger reminders
+    - cron: '30 0 * * *'  # 00:30 UTC — dispatch reminders
+    - cron: '0 14 * * *'  # 14:00 UTC — dispatch retry / in-app second push
   workflow_dispatch:
     inputs:
       job:
@@ -12,6 +13,7 @@ on:
         required: true
         type: choice
         options:
+          - billing-status
           - trigger
           - dispatch-0030
           - dispatch-1400
@@ -26,6 +28,11 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event.schedule }}" = "5 0 * * *" ]; then
+            echo "mode=billing-status" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -48,6 +55,13 @@ jobs:
 
       - name: Print mode
         run: echo "Mode is ${{ steps.mode.outputs.mode }}"
+
+      - name: Billing status (normalize invoice statuses)
+        if: steps.mode.outputs.mode == 'billing-status'
+        run: >
+          curl -sS -X POST
+          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
+          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
       - name: Trigger reminders
         if: steps.mode.outputs.mode == 'trigger'

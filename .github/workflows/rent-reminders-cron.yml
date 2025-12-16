@@ -8,33 +8,60 @@ on:
     - cron: "30 0 * * *"
     # 14:00 UTC — dispatch retry (and in-app second push)
     - cron: "0 14 * * *"
-  workflow_dispatch: {}
+
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Choose what to run"
+        required: true
+        type: choice
+        options:
+          - trigger
+          - dispatch-0030
+          - dispatch-1400
 
 jobs:
-  run-cron:
+  run:
     runs-on: ubuntu-latest
-    steps:
-      - name: Decide which job to run
-        id: decide
-        run: |
-          echo "schedule=${{ github.event.schedule }}" >> $GITHUB_OUTPUT
 
-      - name: Trigger reminders (00:20 UTC)
-        if: steps.decide.outputs.schedule == '20 0 * * *'
+    steps:
+      - name: Decide mode (scheduled vs manual)
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ inputs.job }}" >> $GITHUB_OUTPUT
+          else
+            # scheduled run: map cron string to mode
+            if [ "${{ github.event.schedule }}" = "20 0 * * *" ]; then
+              echo "mode=trigger" >> $GITHUB_OUTPUT
+            elif [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
+              echo "mode=dispatch-0030" >> $GITHUB_OUTPUT
+            elif [ "${{ github.event.schedule }}" = "0 14 * * *" ]; then
+              echo "mode=dispatch-1400" >> $GITHUB_OUTPUT
+            else
+              echo "mode=unknown" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Print selected mode
+        run: echo "Selected mode: ${{ steps.mode.outputs.mode }}"
+
+      - name: Trigger reminders (00:20)
+        if: steps.mode.outputs.mode == 'trigger'
         run: |
           curl -sS -X POST \
             "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
-      - name: Dispatch reminders (00:30 UTC)
-        if: steps.decide.outputs.schedule == '30 0 * * *'
+      - name: Dispatch reminders (00:30)
+        if: steps.mode.outputs.mode == 'dispatch-0030'
         run: |
           curl -sS -X POST \
             "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
-      - name: Dispatch reminders (14:00 UTC)
-        if: steps.decide.outputs.schedule == '0 14 * * *'
+      - name: Dispatch reminders (14:00)
+        if: steps.mode.outputs.mode == 'dispatch-1400'
         run: |
           curl -sS -X POST \
             "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \

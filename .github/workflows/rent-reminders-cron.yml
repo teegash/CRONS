@@ -1,15 +1,14 @@
 name: Rent Reminders Cron
 
-"on":
+on:
   schedule:
-    - cron: "20 0 * * *"  # 00:20 UTC — trigger reminders
-    - cron: "30 0 * * *"  # 00:30 UTC — dispatch reminders
-    - cron: "0 14 * * *"  # 14:00 UTC — dispatch retry / second in-app
-
+    - cron: '20 0 * * *'
+    - cron: '30 0 * * *'
+    - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       job:
-        description: "Choose what to run"
+        description: 'Choose what to run'
         required: true
         type: choice
         options:
@@ -21,52 +20,52 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Decide mode (scheduled vs manual)
+      - name: Set mode
         id: mode
         shell: bash
         run: |
-          set -euo pipefail
-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          case "${{ github.event.schedule }}" in
-            "20 0 * * *")
-              echo "mode=trigger" >> "$GITHUB_OUTPUT"
-              ;;
-            "30 0 * * *")
-              echo "mode=dispatch-0030" >> "$GITHUB_OUTPUT"
-              ;;
-            "0 14 * * *")
-              echo "mode=dispatch-1400" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "mode=unknown" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+          if [ "${{ github.event.schedule }}" = "20 0 * * *" ]; then
+            echo "mode=trigger" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Print selected mode
-        run: echo "Selected mode: ${{ steps.mode.outputs.mode }}"
+          if [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
+            echo "mode=dispatch-0030" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Trigger reminders (00:20)
+          if [ "${{ github.event.schedule }}" = "0 14 * * *" ]; then
+            echo "mode=dispatch-1400" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "mode=unknown" >> "$GITHUB_OUTPUT"
+
+      - name: Print mode
+        run: echo "Mode is ${{ steps.mode.outputs.mode }}"
+
+      - name: Trigger reminders
         if: steps.mode.outputs.mode == 'trigger'
-        run: |
-          curl -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger" \
-            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        run: >
+          curl -sS -X POST
+          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
+          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
-      - name: Dispatch reminders (00:30)
+      - name: Dispatch reminders 0030
         if: steps.mode.outputs.mode == 'dispatch-0030'
-        run: |
-          curl -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
-            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        run: >
+          curl -sS -X POST
+          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
 
-      - name: Dispatch reminders (14:00)
+      - name: Dispatch reminders 1400
         if: steps.mode.outputs.mode == 'dispatch-1400'
-        run: |
-          curl -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
-            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        run: >
+          curl -sS -X POST
+          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

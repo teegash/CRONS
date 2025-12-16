@@ -1,0 +1,41 @@
+name: Rent Reminders Cron
+
+on:
+  schedule:
+    # 00:20 UTC — trigger reminders
+    - cron: "20 0 * * *"
+    # 00:30 UTC — dispatch reminders
+    - cron: "30 0 * * *"
+    # 14:00 UTC — dispatch retry (and in-app second push)
+    - cron: "0 14 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide which job to run
+        id: decide
+        run: |
+          echo "schedule=${{ github.event.schedule }}" >> $GITHUB_OUTPUT
+
+      - name: Trigger reminders (00:20 UTC)
+        if: steps.decide.outputs.schedule == '20 0 * * *'
+        run: |
+          curl -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
+      - name: Dispatch reminders (00:30 UTC)
+        if: steps.decide.outputs.schedule == '30 0 * * *'
+        run: |
+          curl -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+
+      - name: Dispatch reminders (14:00 UTC)
+        if: steps.decide.outputs.schedule == '0 14 * * *'
+        run: |
+          curl -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"

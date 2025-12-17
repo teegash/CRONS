@@ -1,0 +1,40 @@
+name: Cron - Monthly Invoices
+
+on:
+  schedule:
+    # 1st of every month at 00:00 UTC
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+    inputs:
+      catch_up:
+        description: "Generate missed months up to current month (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger Supabase Edge Function (cron-invoices-monthly)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          EDGE_ENDPOINT_URL: https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/cron-invoices-monthly
+          CATCH_UP: ${{ github.event.inputs.catch_up }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "Missing secret: CRON_SECRET"
+            exit 1
+          fi
+
+          URL="$EDGE_ENDPOINT_URL"
+
+          # workflow_dispatch input is empty on schedule runs
+          if [ "$CATCH_UP" = "true" ]; then
+            URL="${URL}?catch_up=true"
+          fi
+
+          curl -sS -X POST "$URL" \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data '{}' | tee /dev/stderr

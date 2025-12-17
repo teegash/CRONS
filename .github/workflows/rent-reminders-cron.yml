@@ -21,6 +21,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Set mode
         id: mode
@@ -61,7 +62,7 @@ jobs:
         run: |
           if [ -z "${{ secrets.CRON_SECRET }}" ]; then
             echo "ERROR: GitHub Actions secret CRON_SECRET is not set."
-            echo "Go to: Repo Settings -> Secrets and variables -> Actions -> New repository secret"
+            echo "Fix: Repo Settings -> Secrets and variables -> Actions -> New repository secret"
             exit 1
           fi
           echo "CRON_SECRET is set (value hidden)."
@@ -70,44 +71,102 @@ jobs:
         if: steps.mode.outputs.mode == 'billing-status'
         shell: bash
         run: |
-          curl --fail-with-body -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status" \
+          set -e
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
+          echo "Calling: $URL"
+
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+            "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}'
+            -d '{}')
+
+          echo "HTTP $http_code"
+          echo "Response:"
+          cat response.json || true
+          echo ""
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Request failed"
+            exit 1
+          fi
 
       - name: Trigger reminders
         if: steps.mode.outputs.mode == 'trigger'
         shell: bash
         run: |
-          curl --fail-with-body -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger" \
+          set -e
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
+          echo "Calling: $URL"
+
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+            "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}'
+            -d '{}')
+
+          echo "HTTP $http_code"
+          echo "Response:"
+          cat response.json || true
+          echo ""
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Request failed"
+            exit 1
+          fi
 
       - name: Dispatch reminders 0030
         if: steps.mode.outputs.mode == 'dispatch-0030'
         shell: bash
         run: |
-          curl --fail-with-body -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+          set -e
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+          echo "Calling: $URL"
+
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+            "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}'
+            -d '{}')
+
+          echo "HTTP $http_code"
+          echo "Response:"
+          cat response.json || true
+          echo ""
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Request failed"
+            exit 1
+          fi
 
       - name: Dispatch reminders 1400
         if: steps.mode.outputs.mode == 'dispatch-1400'
         shell: bash
         run: |
-          curl --fail-with-body -sS -X POST \
-            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+          set -e
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+          echo "Calling: $URL"
+
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+            "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}'
+            -d '{}')
+
+          echo "HTTP $http_code"
+          echo "Response:"
+          cat response.json || true
+          echo ""
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Request failed"
+            exit 1
+          fi
 
       - name: Unknown mode guard
         if: steps.mode.outputs.mode == 'unknown'
+        shell: bash
         run: |
-          echo "ERROR: Unknown schedule mapping. github.event.schedule was: ${{ github.event.schedule }}"
+          echo "ERROR: Unknown schedule mapping."
+          echo "github.event.schedule was: ${{ github.event.schedule }}"
           exit 1

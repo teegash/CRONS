@@ -10,17 +10,37 @@ on:
         description: "Generate missed months up to current month (true/false)"
         required: false
         default: "false"
+      dry_run:
+        description: "Compute only, do not insert (true/false)"
+        required: false
+        default: "false"
+      max_months:
+        description: "Catch-up hard cap (e.g., 12, 24, 36)"
+        required: false
+        default: "36"
+      chunk_size:
+        description: "RPC batch size (e.g., 250, 500, 1000)"
+        required: false
+        default: "500"
+      lock_window_minutes:
+        description: "Concurrency guard window minutes (e.g., 10)"
+        required: false
+        default: "10"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Trigger Supabase Edge Function (cron-invoices-monthly)
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           EDGE_ENDPOINT_URL: https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/cron-invoices-monthly
           CATCH_UP: ${{ github.event.inputs.catch_up }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAX_MONTHS: ${{ github.event.inputs.max_months }}
+          CHUNK_SIZE: ${{ github.event.inputs.chunk_size }}
+          LOCK_WINDOW_MINUTES: ${{ github.event.inputs.lock_window_minutes }}
         run: |
           if [ -z "$CRON_SECRET" ]; then
             echo "Missing secret: CRON_SECRET"
@@ -29,10 +49,18 @@ jobs:
 
           URL="$EDGE_ENDPOINT_URL"
 
-          # workflow_dispatch input is empty on schedule runs
-          if [ "$CATCH_UP" = "true" ]; then
-            URL="${URL}?catch_up=true"
-          fi
+          # Scheduled runs have empty inputs; apply safe defaults
+          CATCH_UP="${CATCH_UP:-false}"
+          DRY_RUN="${DRY_RUN:-false}"
+          MAX_MONTHS="${MAX_MONTHS:-36}"
+          CHUNK_SIZE="${CHUNK_SIZE:-500}"
+          LOCK_WINDOW_MINUTES="${LOCK_WINDOW_MINUTES:-10}"
+
+          # Build query string
+          QS="catch_up=${CATCH_UP}&dry_run=${DRY_RUN}&max_months=${MAX_MONTHS}&chunk_size=${CHUNK_SIZE}&lock_window_minutes=${LOCK_WINDOW_MINUTES}"
+          URL="${URL}?${QS}"
+
+          echo "Calling: $URL"
 
           curl -sS -X POST "$URL" \
             -H "x-cron-secret: ${CRON_SECRET}" \

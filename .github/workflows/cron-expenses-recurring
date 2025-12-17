@@ -1,0 +1,31 @@
+name: Cron - Recurring Expenses
+
+on:
+  schedule:
+    # Runs daily at 00:10 UTC (03:10 Africa/Nairobi)
+    - cron: "10 0 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger Supabase Edge Function (cron-expenses-recurring)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          EDGE_ENDPOINT_URL: https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/cron-expenses-recurring
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "Missing secret: CRON_SECRET"
+            exit 1
+          fi
+          if [ -z "$EDGE_ENDPOINT_URL" ]; then
+            echo "Missing env: EDGE_ENDPOINT_URL"
+            exit 1
+          fi
+
+          curl -sS -X POST "$EDGE_ENDPOINT_URL" \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data '{}' | tee /dev/stderr

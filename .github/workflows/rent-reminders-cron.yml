@@ -2,10 +2,10 @@ name: Rent Reminders Cron
 
 on:
   schedule:
-    - cron: '5 0 * * *'   # 00:05 UTC — billing/status normalize
-    - cron: '20 0 * * *'  # 00:20 UTC — trigger reminders
-    - cron: '30 0 * * *'  # 00:30 UTC — dispatch reminders
-    - cron: '0 14 * * *'  # 14:00 UTC — dispatch retry / in-app second push
+    - cron: '5 0 * * *'    # 00:05 UTC — billing/status normalize
+    - cron: '20 0 * * *'   # 00:20 UTC — trigger reminders
+    - cron: '30 0 * * *'   # 00:30 UTC — dispatch reminders
+    - cron: '0 14 * * *'   # 14:00 UTC — dispatch retry / in-app second push
   workflow_dispatch:
     inputs:
       job:
@@ -56,30 +56,58 @@ jobs:
       - name: Print mode
         run: echo "Mode is ${{ steps.mode.outputs.mode }}"
 
+      - name: Ensure CRON_SECRET is set
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.CRON_SECRET }}" ]; then
+            echo "ERROR: GitHub Actions secret CRON_SECRET is not set."
+            echo "Go to: Repo Settings -> Secrets and variables -> Actions -> New repository secret"
+            exit 1
+          fi
+          echo "CRON_SECRET is set (value hidden)."
+
       - name: Billing status (normalize invoice statuses)
         if: steps.mode.outputs.mode == 'billing-status'
-        run: >
-          curl -sS -X POST
-          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
-          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        shell: bash
+        run: |
+          curl --fail-with-body -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            -d '{}'
 
       - name: Trigger reminders
         if: steps.mode.outputs.mode == 'trigger'
-        run: >
-          curl -sS -X POST
-          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
-          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        shell: bash
+        run: |
+          curl --fail-with-body -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            -d '{}'
 
       - name: Dispatch reminders 0030
         if: steps.mode.outputs.mode == 'dispatch-0030'
-        run: >
-          curl -sS -X POST
-          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
-          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        shell: bash
+        run: |
+          curl --fail-with-body -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            -d '{}'
 
       - name: Dispatch reminders 1400
         if: steps.mode.outputs.mode == 'dispatch-1400'
-        run: >
-          curl -sS -X POST
-          "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
-          -H "x-cron-secret: ${{ secrets.CRON_SECRET }}"
+        shell: bash
+        run: |
+          curl --fail-with-body -sS -X POST \
+            "https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            -d '{}'
+
+      - name: Unknown mode guard
+        if: steps.mode.outputs.mode == 'unknown'
+        run: |
+          echo "ERROR: Unknown schedule mapping. github.event.schedule was: ${{ github.event.schedule }}"
+          exit 1

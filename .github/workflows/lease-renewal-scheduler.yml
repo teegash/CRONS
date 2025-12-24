@@ -1,0 +1,48 @@
+name: Lease Renewal Reminder Scheduler
+
+on:
+  schedule:
+    # 03:05 UTC ≈ 06:05 Africa/Nairobi (UTC+3)
+    - cron: "5 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: lease-renewal-scheduler
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate secrets
+        shell: bash
+        run: |
+          if [ -z "${SUPABASE_FUNCTIONS_BASE_URL}" ]; then
+            echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
+            exit 1
+          fi
+          if [ -z "${SUPABASE_SERVICE_ROLE_KEY}" ]; then
+            echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
+            exit 1
+          fi
+
+      - name: Call Edge Function - lease-renewal-scheduler
+        shell: bash
+        env:
+          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
+        run: |
+          TIMEOUT="${TIMEOUT:-30}"
+          URL="${BASE_URL%/}/lease-renewal-scheduler"
+
+          echo "Calling: ${URL}"
+          RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
+            -X POST "${URL}" \
+            -H "Authorization: Bearer ${SRK}" \
+            -H "Content-Type: application/json" \
+            -d '{"scheduled_slot":"14:00","offsets":[90,60,30]}' )"
+
+          echo "Response:"
+          echo "${RESP}"

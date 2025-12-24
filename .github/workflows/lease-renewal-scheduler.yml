@@ -40,6 +40,7 @@ jobs:
           BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          set -euo pipefail
           if [ -z "${BASE_URL}" ]; then
             echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
             exit 1
@@ -48,6 +49,7 @@ jobs:
             echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
             exit 1
           fi
+          echo "Secrets present. BASE_URL length: ${#BASE_URL}"
 
       - name: Build payload
         id: payload
@@ -58,25 +60,38 @@ jobs:
           INPUT_OFFSETS: ${{ inputs.offsets_csv }}
           INPUT_TODAY: ${{ inputs.today_override }}
         run: |
+          set -euo pipefail
+          echo "Event: ${EVENT_NAME}"
+          echo "Inputs scheduled_slot='${INPUT_SLOT}' offsets_csv='${INPUT_OFFSETS}' today_override='${INPUT_TODAY}'"
+
           # Defaults for scheduled runs
           SLOT="14:00"
           OFFSETS_CSV="90,60,30"
           TODAY_OVERRIDE=""
 
-          # If manually triggered, use inputs (if provided)
+          # Manual triggers can override
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             if [ -n "${INPUT_SLOT}" ]; then SLOT="${INPUT_SLOT}"; fi
             if [ -n "${INPUT_OFFSETS}" ]; then OFFSETS_CSV="${INPUT_OFFSETS}"; fi
             if [ -n "${INPUT_TODAY}" ]; then TODAY_OVERRIDE="${INPUT_TODAY}"; fi
           fi
 
-          # Convert CSV offsets -> JSON array
+          # Validate slot
+          if [ "${SLOT}" != "14:00" ] && [ "${SLOT}" != "00:30" ]; then
+            echo "Invalid scheduled_slot: ${SLOT}"
+            exit 1
+          fi
+
+          # Convert CSV offsets -> JSON array (strict numeric parsing)
           OFFSETS_JSON="$(echo "${OFFSETS_CSV}" | awk -F',' '{
             printf "[";
+            outCount=0;
             for (i=1; i<=NF; i++) {
               gsub(/^[ \t]+|[ \t]+$/, "", $i);
               if ($i ~ /^[0-9]+$/) {
-                printf "%s%s", (i==1?"":","), $i;
+                if (outCount>0) printf ",";
+                printf "%s", $i;
+                outCount++;
               }
             }
             printf "]";
@@ -94,10 +109,10 @@ jobs:
             PAYLOAD="{\"scheduled_slot\":\"${SLOT}\",\"offsets\":${OFFSETS_JSON}}"
           fi
 
-          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
           echo "Using payload: ${PAYLOAD}"
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
 
-      - name: Call Edge Function - lease-renewal-scheduler
+      - name: Call Edge Function - lease-renewal-scheduler (prints status/body)
         shell: bash
         env:
           BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
@@ -105,17 +120,30 @@ jobs:
           TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
           PAYLOAD: ${{ steps.payload.outputs.payload }}
         run: |
+          set -euo pipefail
           TIMEOUT="${TIMEOUT:-30}"
           URL="${BASE_URL%/}/lease-renewal-scheduler"
 
           echo "Calling: ${URL}"
+          echo "Timeout: ${TIMEOUT}s"
           echo "Payload: ${PAYLOAD}"
 
-          RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
+          BODY_FILE="$(mktemp)"
+          HTTP_CODE="$(curl -sS --max-time "${TIMEOUT}" \
+            -o "${BODY_FILE}" \
+            -w "%{http_code}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d "${PAYLOAD}" )"
+            -d "${PAYLOAD}" || true)"
 
-          echo "Response:"
-          echo "${RESP}"
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "Response body:"
+          cat "${BODY_FILE}" || true
+          echo ""
+
+          # Fail the job if not 2xx
+          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+            echo "Edge function call failed (HTTP ${HTTP_CODE})"
+            exit 1
+          fi

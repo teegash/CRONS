@@ -11,9 +11,14 @@ on:
         default: "50"
         type: string
       max_attempts:
-        description: "Max attempts before skipping a reminder (1-10)"
+        description: "Max attempts before marking reminder as failed (1-10)"
         required: false
         default: "5"
+        type: string
+      timeout_seconds:
+        description: "HTTP call timeout seconds (5-120)"
+        required: false
+        default: "30"
         type: string
 
 concurrency:
@@ -28,17 +33,14 @@ jobs:
       - name: Validate secrets
         shell: bash
         env:
-          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          if [ -z "${BASE_URL}" ]; then
-            echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
+          set -euo pipefail
+          if [ -z "${SRK:-}" ]; then
+            echo "::error::Missing SUPABASE_SERVICE_ROLE_KEY secret."
             exit 1
           fi
-          if [ -z "${SRK}" ]; then
-            echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
-            exit 1
-          fi
+          echo "SUPABASE_SERVICE_ROLE_KEY length: ${#SRK}"
 
       - name: Build payload
         id: payload
@@ -47,59 +49,91 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_BATCH: ${{ inputs.batch_size }}
           INPUT_ATTEMPTS: ${{ inputs.max_attempts }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
+          set -euo pipefail
+          echo "Event: ${EVENT_NAME}"
+          echo "Inputs batch_size='${INPUT_BATCH}' max_attempts='${INPUT_ATTEMPTS}' timeout_seconds='${INPUT_TIMEOUT}'"
+
           # Defaults for scheduled runs
           BATCH="50"
           ATTEMPTS="5"
+          TIMEOUT="30"
 
-          # Manual runs can override
+          # Manual triggers can override
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            if [ -n "${INPUT_BATCH}" ]; then BATCH="${INPUT_BATCH}"; fi
-            if [ -n "${INPUT_ATTEMPTS}" ]; then ATTEMPTS="${INPUT_ATTEMPTS}"; fi
+            if [ -n "${INPUT_BATCH:-}" ]; then BATCH="${INPUT_BATCH}"; fi
+            if [ -n "${INPUT_ATTEMPTS:-}" ]; then ATTEMPTS="${INPUT_ATTEMPTS}"; fi
+            if [ -n "${INPUT_TIMEOUT:-}" ]; then TIMEOUT="${INPUT_TIMEOUT}"; fi
           fi
 
-          # Validate numeric ranges
+          # Validate numeric
           if ! [[ "${BATCH}" =~ ^[0-9]+$ ]]; then
-            echo "batch_size must be numeric"
+            echo "::error::batch_size must be numeric"
             exit 1
           fi
           if ! [[ "${ATTEMPTS}" =~ ^[0-9]+$ ]]; then
-            echo "max_attempts must be numeric"
+            echo "::error::max_attempts must be numeric"
+            exit 1
+          fi
+          if ! [[ "${TIMEOUT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::timeout_seconds must be numeric"
             exit 1
           fi
 
+          # Validate ranges
           if [ "${BATCH}" -lt 1 ] || [ "${BATCH}" -gt 200 ]; then
-            echo "batch_size out of range (1-200): ${BATCH}"
+            echo "::error::batch_size out of range (1-200): ${BATCH}"
             exit 1
           fi
           if [ "${ATTEMPTS}" -lt 1 ] || [ "${ATTEMPTS}" -gt 10 ]; then
-            echo "max_attempts out of range (1-10): ${ATTEMPTS}"
+            echo "::error::max_attempts out of range (1-10): ${ATTEMPTS}"
+            exit 1
+          fi
+          if [ "${TIMEOUT}" -lt 5 ] || [ "${TIMEOUT}" -gt 120 ]; then
+            echo "::error::timeout_seconds out of range (5-120): ${TIMEOUT}"
             exit 1
           fi
 
           PAYLOAD="{\"batchSize\":${BATCH},\"maxAttempts\":${ATTEMPTS}}"
-          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
-          echo "Using payload: ${PAYLOAD}"
 
-      - name: Call Edge Function - reminder-dispatcher
+          echo "Final BATCH=${BATCH}"
+          echo "Final ATTEMPTS=${ATTEMPTS}"
+          echo "Final TIMEOUT=${TIMEOUT}"
+          echo "Final PAYLOAD=${PAYLOAD}"
+
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "timeout=${TIMEOUT}" >> $GITHUB_OUTPUT
+
+      - name: Call Edge Function - reminder-dispatcher (always prints status/body)
         shell: bash
         env:
-          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
           PAYLOAD: ${{ steps.payload.outputs.payload }}
+          TIMEOUT: ${{ steps.payload.outputs.timeout }}
         run: |
-          TIMEOUT="${TIMEOUT:-30}"
-          URL="${BASE_URL%/}/reminder-dispatcher"
+          set -euo pipefail
 
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminder-dispatcher"
           echo "Calling: ${URL}"
+          echo "Timeout: ${TIMEOUT}s"
           echo "Payload: ${PAYLOAD}"
 
-          RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
+          BODY_FILE="$(mktemp)"
+          HTTP_CODE="$(curl -sS --max-time "${TIMEOUT}" \
+            -o "${BODY_FILE}" \
+            -w "%{http_code}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d "${PAYLOAD}" )"
+            -d "${PAYLOAD}" || true)"
 
-          echo "Response:"
-          echo "${RESP}"
+          echo "HTTP status: ${HTTP_CODE}"
+          echo "Response body (raw):"
+          cat "${BODY_FILE}" || true
+          echo ""
+
+          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+            echo "::error::Edge function call failed. HTTP ${HTTP_CODE}. See response body in logs."
+            exit 1
+          fi

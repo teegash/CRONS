@@ -42,26 +42,13 @@ jobs:
       - name: Validate secrets
         shell: bash
         env:
-          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-
-          # Print which trigger started the job
-          echo "Trigger: ${{ github.event_name }}"
-
-          if [ -z "${BASE_URL:-}" ]; then
-            echo "::error::Missing SUPABASE_FUNCTIONS_BASE_URL secret."
-            exit 1
-          fi
-
           if [ -z "${SRK:-}" ]; then
             echo "::error::Missing SUPABASE_SERVICE_ROLE_KEY secret."
             exit 1
           fi
-
-          # Print sanitized URL info (no secrets leaked)
-          echo "SUPABASE_FUNCTIONS_BASE_URL (sanitized): ${BASE_URL%/}"
           echo "SUPABASE_SERVICE_ROLE_KEY length: ${#SRK}"
 
       - name: Build payload
@@ -75,7 +62,6 @@ jobs:
           INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
           set -euo pipefail
-
           echo "Event: ${EVENT_NAME}"
           echo "Inputs scheduled_slot='${INPUT_SLOT}' offsets_csv='${INPUT_OFFSETS}' today_override='${INPUT_TODAY}' timeout_seconds='${INPUT_TIMEOUT}'"
 
@@ -148,14 +134,13 @@ jobs:
       - name: Call Edge Function - lease-renewal-scheduler (always prints status/body)
         shell: bash
         env:
-          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PAYLOAD: ${{ steps.payload.outputs.payload }}
           TIMEOUT: ${{ steps.payload.outputs.timeout }}
         run: |
           set -euo pipefail
 
-          URL="${BASE_URL%/}/lease-renewal-scheduler"
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/lease-renewal-scheduler"
           echo "Calling: ${URL}"
           echo "Timeout: ${TIMEOUT}s"
           echo "Payload: ${PAYLOAD}"
@@ -175,7 +160,6 @@ jobs:
           echo ""
 
           if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            # Emit an annotation so it shows under "Annotations"
             echo "::error::Edge function call failed. HTTP ${HTTP_CODE}. See response body in logs."
             exit 1
           fi

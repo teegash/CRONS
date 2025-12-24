@@ -1,0 +1,47 @@
+name: Reminder Dispatcher
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: reminder-dispatcher
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate secrets
+        shell: bash
+        run: |
+          if [ -z "${SUPABASE_FUNCTIONS_BASE_URL}" ]; then
+            echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
+            exit 1
+          fi
+          if [ -z "${SUPABASE_SERVICE_ROLE_KEY}" ]; then
+            echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
+            exit 1
+          fi
+
+      - name: Call Edge Function - reminder-dispatcher
+        shell: bash
+        env:
+          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
+        run: |
+          TIMEOUT="${TIMEOUT:-30}"
+          URL="${BASE_URL%/}/reminder-dispatcher"
+
+          echo "Calling: ${URL}"
+          RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
+            -X POST "${URL}" \
+            -H "Authorization: Bearer ${SRK}" \
+            -H "Content-Type: application/json" \
+            -d '{"batchSize":50,"maxAttempts":5}' )"
+
+          echo "Response:"
+          echo "${RESP}"

@@ -24,6 +24,11 @@ on:
         required: false
         default: ""
         type: string
+      timeout_seconds:
+        description: "HTTP call timeout seconds (5-120)"
+        required: false
+        default: "30"
+        type: string
 
 concurrency:
   group: lease-renewal-scheduler
@@ -41,15 +46,23 @@ jobs:
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${BASE_URL}" ]; then
-            echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
+
+          # Print which trigger started the job
+          echo "Trigger: ${{ github.event_name }}"
+
+          if [ -z "${BASE_URL:-}" ]; then
+            echo "::error::Missing SUPABASE_FUNCTIONS_BASE_URL secret."
             exit 1
           fi
-          if [ -z "${SRK}" ]; then
-            echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
+
+          if [ -z "${SRK:-}" ]; then
+            echo "::error::Missing SUPABASE_SERVICE_ROLE_KEY secret."
             exit 1
           fi
-          echo "Secrets present. BASE_URL length: ${#BASE_URL}"
+
+          # Print sanitized URL info (no secrets leaked)
+          echo "SUPABASE_FUNCTIONS_BASE_URL (sanitized): ${BASE_URL%/}"
+          echo "SUPABASE_SERVICE_ROLE_KEY length: ${#SRK}"
 
       - name: Build payload
         id: payload
@@ -59,26 +72,40 @@ jobs:
           INPUT_SLOT: ${{ inputs.scheduled_slot }}
           INPUT_OFFSETS: ${{ inputs.offsets_csv }}
           INPUT_TODAY: ${{ inputs.today_override }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
         run: |
           set -euo pipefail
+
           echo "Event: ${EVENT_NAME}"
-          echo "Inputs scheduled_slot='${INPUT_SLOT}' offsets_csv='${INPUT_OFFSETS}' today_override='${INPUT_TODAY}'"
+          echo "Inputs scheduled_slot='${INPUT_SLOT}' offsets_csv='${INPUT_OFFSETS}' today_override='${INPUT_TODAY}' timeout_seconds='${INPUT_TIMEOUT}'"
 
           # Defaults for scheduled runs
           SLOT="14:00"
           OFFSETS_CSV="90,60,30"
           TODAY_OVERRIDE=""
+          TIMEOUT="30"
 
           # Manual triggers can override
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            if [ -n "${INPUT_SLOT}" ]; then SLOT="${INPUT_SLOT}"; fi
-            if [ -n "${INPUT_OFFSETS}" ]; then OFFSETS_CSV="${INPUT_OFFSETS}"; fi
-            if [ -n "${INPUT_TODAY}" ]; then TODAY_OVERRIDE="${INPUT_TODAY}"; fi
+            if [ -n "${INPUT_SLOT:-}" ]; then SLOT="${INPUT_SLOT}"; fi
+            if [ -n "${INPUT_OFFSETS:-}" ]; then OFFSETS_CSV="${INPUT_OFFSETS}"; fi
+            if [ -n "${INPUT_TODAY:-}" ]; then TODAY_OVERRIDE="${INPUT_TODAY}"; fi
+            if [ -n "${INPUT_TIMEOUT:-}" ]; then TIMEOUT="${INPUT_TIMEOUT}"; fi
           fi
 
           # Validate slot
           if [ "${SLOT}" != "14:00" ] && [ "${SLOT}" != "00:30" ]; then
-            echo "Invalid scheduled_slot: ${SLOT}"
+            echo "::error::Invalid scheduled_slot '${SLOT}'. Allowed: 14:00 or 00:30"
+            exit 1
+          fi
+
+          # Validate timeout
+          if ! [[ "${TIMEOUT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::timeout_seconds must be numeric. Got '${TIMEOUT}'"
+            exit 1
+          fi
+          if [ "${TIMEOUT}" -lt 5 ] || [ "${TIMEOUT}" -gt 120 ]; then
+            echo "::error::timeout_seconds out of range (5-120). Got '${TIMEOUT}'"
             exit 1
           fi
 
@@ -98,7 +125,7 @@ jobs:
           }')"
 
           if [ "${OFFSETS_JSON}" = "[]" ]; then
-            echo "Offsets CSV is invalid or empty: '${OFFSETS_CSV}'"
+            echo "::error::Offsets CSV invalid or empty: '${OFFSETS_CSV}'. Example valid: 90,60,30"
             exit 1
           fi
 
@@ -109,21 +136,26 @@ jobs:
             PAYLOAD="{\"scheduled_slot\":\"${SLOT}\",\"offsets\":${OFFSETS_JSON}}"
           fi
 
-          echo "Using payload: ${PAYLOAD}"
-          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "Final SLOT=${SLOT}"
+          echo "Final OFFSETS_JSON=${OFFSETS_JSON}"
+          echo "Final TODAY_OVERRIDE='${TODAY_OVERRIDE}'"
+          echo "Final TIMEOUT=${TIMEOUT}"
+          echo "Final PAYLOAD=${PAYLOAD}"
 
-      - name: Call Edge Function - lease-renewal-scheduler (prints status/body)
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "timeout=${TIMEOUT}" >> $GITHUB_OUTPUT
+
+      - name: Call Edge Function - lease-renewal-scheduler (always prints status/body)
         shell: bash
         env:
           BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
           PAYLOAD: ${{ steps.payload.outputs.payload }}
+          TIMEOUT: ${{ steps.payload.outputs.timeout }}
         run: |
           set -euo pipefail
-          TIMEOUT="${TIMEOUT:-30}"
-          URL="${BASE_URL%/}/lease-renewal-scheduler"
 
+          URL="${BASE_URL%/}/lease-renewal-scheduler"
           echo "Calling: ${URL}"
           echo "Timeout: ${TIMEOUT}s"
           echo "Payload: ${PAYLOAD}"
@@ -138,12 +170,12 @@ jobs:
             -d "${PAYLOAD}" || true)"
 
           echo "HTTP status: ${HTTP_CODE}"
-          echo "Response body:"
+          echo "Response body (raw):"
           cat "${BODY_FILE}" || true
           echo ""
 
-          # Fail the job if not 2xx
           if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            echo "Edge function call failed (HTTP ${HTTP_CODE})"
+            # Emit an annotation so it shows under "Annotations"
+            echo "::error::Edge function call failed. HTTP ${HTTP_CODE}. See response body in logs."
             exit 1
           fi

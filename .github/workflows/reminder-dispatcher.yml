@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "How many reminders to process in one run (1-200)"
+        required: false
+        default: "50"
+        type: string
+      max_attempts:
+        description: "Max attempts before skipping a reminder (1-10)"
+        required: false
+        default: "5"
+        type: string
 
 concurrency:
   group: reminder-dispatcher
@@ -16,15 +27,59 @@ jobs:
     steps:
       - name: Validate secrets
         shell: bash
+        env:
+          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          if [ -z "${SUPABASE_FUNCTIONS_BASE_URL}" ]; then
+          if [ -z "${BASE_URL}" ]; then
             echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
             exit 1
           fi
-          if [ -z "${SUPABASE_SERVICE_ROLE_KEY}" ]; then
+          if [ -z "${SRK}" ]; then
             echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
             exit 1
           fi
+
+      - name: Build payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BATCH: ${{ inputs.batch_size }}
+          INPUT_ATTEMPTS: ${{ inputs.max_attempts }}
+        run: |
+          # Defaults for scheduled runs
+          BATCH="50"
+          ATTEMPTS="5"
+
+          # Manual runs can override
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -n "${INPUT_BATCH}" ]; then BATCH="${INPUT_BATCH}"; fi
+            if [ -n "${INPUT_ATTEMPTS}" ]; then ATTEMPTS="${INPUT_ATTEMPTS}"; fi
+          fi
+
+          # Validate numeric ranges
+          if ! [[ "${BATCH}" =~ ^[0-9]+$ ]]; then
+            echo "batch_size must be numeric"
+            exit 1
+          fi
+          if ! [[ "${ATTEMPTS}" =~ ^[0-9]+$ ]]; then
+            echo "max_attempts must be numeric"
+            exit 1
+          fi
+
+          if [ "${BATCH}" -lt 1 ] || [ "${BATCH}" -gt 200 ]; then
+            echo "batch_size out of range (1-200): ${BATCH}"
+            exit 1
+          fi
+          if [ "${ATTEMPTS}" -lt 1 ] || [ "${ATTEMPTS}" -gt 10 ]; then
+            echo "max_attempts out of range (1-10): ${ATTEMPTS}"
+            exit 1
+          fi
+
+          PAYLOAD="{\"batchSize\":${BATCH},\"maxAttempts\":${ATTEMPTS}}"
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "Using payload: ${PAYLOAD}"
 
       - name: Call Edge Function - reminder-dispatcher
         shell: bash
@@ -32,16 +87,19 @@ jobs:
           BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
+          PAYLOAD: ${{ steps.payload.outputs.payload }}
         run: |
           TIMEOUT="${TIMEOUT:-30}"
           URL="${BASE_URL%/}/reminder-dispatcher"
 
           echo "Calling: ${URL}"
+          echo "Payload: ${PAYLOAD}"
+
           RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d '{"batchSize":50,"maxAttempts":5}' )"
+            -d "${PAYLOAD}" )"
 
           echo "Response:"
           echo "${RESP}"

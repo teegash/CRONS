@@ -5,6 +5,25 @@ on:
     # 03:05 UTC ≈ 06:05 Africa/Nairobi (UTC+3)
     - cron: "5 3 * * *"
   workflow_dispatch:
+    inputs:
+      scheduled_slot:
+        description: "Scheduled slot (00:30 or 14:00)"
+        required: false
+        default: "14:00"
+        type: choice
+        options:
+          - "14:00"
+          - "00:30"
+      offsets_csv:
+        description: "Offsets in days, CSV (e.g. 90,60,30 or 30)"
+        required: false
+        default: "90,60,30"
+        type: string
+      today_override:
+        description: "Override 'today' (YYYY-MM-DD). Leave empty to use Nairobi today."
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: lease-renewal-scheduler
@@ -17,15 +36,66 @@ jobs:
     steps:
       - name: Validate secrets
         shell: bash
+        env:
+          BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          if [ -z "${SUPABASE_FUNCTIONS_BASE_URL}" ]; then
+          if [ -z "${BASE_URL}" ]; then
             echo "Missing SUPABASE_FUNCTIONS_BASE_URL secret"
             exit 1
           fi
-          if [ -z "${SUPABASE_SERVICE_ROLE_KEY}" ]; then
+          if [ -z "${SRK}" ]; then
             echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"
             exit 1
           fi
+
+      - name: Build payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SLOT: ${{ inputs.scheduled_slot }}
+          INPUT_OFFSETS: ${{ inputs.offsets_csv }}
+          INPUT_TODAY: ${{ inputs.today_override }}
+        run: |
+          # Defaults for scheduled runs
+          SLOT="14:00"
+          OFFSETS_CSV="90,60,30"
+          TODAY_OVERRIDE=""
+
+          # If manually triggered, use inputs (if provided)
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -n "${INPUT_SLOT}" ]; then SLOT="${INPUT_SLOT}"; fi
+            if [ -n "${INPUT_OFFSETS}" ]; then OFFSETS_CSV="${INPUT_OFFSETS}"; fi
+            if [ -n "${INPUT_TODAY}" ]; then TODAY_OVERRIDE="${INPUT_TODAY}"; fi
+          fi
+
+          # Convert CSV offsets -> JSON array
+          OFFSETS_JSON="$(echo "${OFFSETS_CSV}" | awk -F',' '{
+            printf "[";
+            for (i=1; i<=NF; i++) {
+              gsub(/^[ \t]+|[ \t]+$/, "", $i);
+              if ($i ~ /^[0-9]+$/) {
+                printf "%s%s", (i==1?"":","), $i;
+              }
+            }
+            printf "]";
+          }')"
+
+          if [ "${OFFSETS_JSON}" = "[]" ]; then
+            echo "Offsets CSV is invalid or empty: '${OFFSETS_CSV}'"
+            exit 1
+          fi
+
+          # Build JSON payload
+          if [ -n "${TODAY_OVERRIDE}" ]; then
+            PAYLOAD="{\"scheduled_slot\":\"${SLOT}\",\"offsets\":${OFFSETS_JSON},\"todayOverride\":\"${TODAY_OVERRIDE}\"}"
+          else
+            PAYLOAD="{\"scheduled_slot\":\"${SLOT}\",\"offsets\":${OFFSETS_JSON}}"
+          fi
+
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "Using payload: ${PAYLOAD}"
 
       - name: Call Edge Function - lease-renewal-scheduler
         shell: bash
@@ -33,16 +103,19 @@ jobs:
           BASE_URL: ${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TIMEOUT: ${{ secrets.CRON_CALL_TIMEOUT_SECONDS }}
+          PAYLOAD: ${{ steps.payload.outputs.payload }}
         run: |
           TIMEOUT="${TIMEOUT:-30}"
           URL="${BASE_URL%/}/lease-renewal-scheduler"
 
           echo "Calling: ${URL}"
+          echo "Payload: ${PAYLOAD}"
+
           RESP="$(curl -sS --fail-with-body --max-time "${TIMEOUT}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d '{"scheduled_slot":"14:00","offsets":[90,60,30]}' )"
+            -d "${PAYLOAD}" )"
 
           echo "Response:"
           echo "${RESP}"

@@ -1,0 +1,66 @@
+name: M-Pesa Auto Verify (Edge)
+
+on:
+  schedule:
+    # Every 5 minutes (UTC). GitHub schedules are best-effort, not guaranteed exact.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max records to process (overrides default)"
+        required: false
+        default: "100"
+
+concurrency:
+  group: mpesa-auto-verify
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Call Supabase Edge Function (mpesa-auto-verify)
+        env:
+          URL: ${{ secrets.SUPABASE_EDGE_MPESA_AUTOVERIFY_URL }}
+          SECRET: ${{ secrets.SUPABASE_CRON_SECRET }}
+          DEFAULT_LIMIT: ${{ secrets.MPESA_VERIFY_LIMIT }}
+          INPUT_LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${URL}" ]; then
+            echo "Missing SUPABASE_EDGE_MPESA_AUTOVERIFY_URL secret"
+            exit 1
+          fi
+
+          # Pick limit: workflow_dispatch input > secret default > fallback 100
+          LIMIT="${INPUT_LIMIT:-}"
+          if [ -z "${LIMIT}" ]; then
+            LIMIT="${DEFAULT_LIMIT:-}"
+          fi
+          if [ -z "${LIMIT}" ]; then
+            LIMIT="100"
+          fi
+
+          FULL_URL="${URL}?limit=${LIMIT}"
+
+          echo "Calling: ${FULL_URL}"
+
+          # Prefer Authorization Bearer (works with the updated auth guard)
+          # If you keep x-cron-secret only, switch header accordingly.
+          HTTP_CODE=$(curl -sS -o resp.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${SECRET}" \
+            -H "Content-Type: application/json" \
+            "${FULL_URL}" \
+          )
+
+          echo "HTTP ${HTTP_CODE}"
+          cat resp.json || true
+
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "Request failed"
+            exit 1
+          fi

@@ -30,8 +30,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${URL}" ]; then
-            echo "Missing SUPABASE_EDGE_MPESA_AUTOVERIFY_URL secret"
+          if [ -z "${URL:-}" ]; then
+            echo "ERROR: Missing SUPABASE_EDGE_MPESA_AUTOVERIFY_URL secret"
+            exit 1
+          fi
+
+          if [ -z "${SECRET:-}" ]; then
+            echo "ERROR: Missing SUPABASE_CRON_SECRET secret"
             exit 1
           fi
 
@@ -47,20 +52,23 @@ jobs:
           FULL_URL="${URL}?limit=${LIMIT}"
 
           echo "Calling: ${FULL_URL}"
+          echo "Secret length: ${#SECRET}"  # does not expose the secret
 
-          # Prefer Authorization Bearer (works with the updated auth guard)
-          # If you keep x-cron-secret only, switch header accordingly.
-          HTTP_CODE=$(curl -sS -o resp.json -w "%{http_code}" \
+          # Capture headers + body for debugging
+          HTTP_CODE=$(curl -sS -D resp.headers -o resp.json -w "%{http_code}" \
             -X POST \
             -H "Authorization: Bearer ${SECRET}" \
             -H "Content-Type: application/json" \
-            "${FULL_URL}" \
+            "${FULL_URL}"
           )
 
           echo "HTTP ${HTTP_CODE}"
+          echo "---- Response headers ----"
+          cat resp.headers || true
+          echo "---- Response body ----"
           cat resp.json || true
 
           if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
-            echo "Request failed"
+            echo "ERROR: Request failed"
             exit 1
           fi

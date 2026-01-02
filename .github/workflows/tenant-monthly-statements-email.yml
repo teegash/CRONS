@@ -2,7 +2,8 @@ name: Tenant Monthly Statements Email
 
 on:
   schedule:
-    - cron: "5 15 * * *"  # daily; function decides last day (Nairobi)
+    # 18:05 Nairobi = 15:05 UTC
+    - cron: "5 15 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -22,21 +23,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Call Supabase Edge Function (Monthly Statements)
+        shell: bash
         env:
           MODE: ${{ github.event.inputs.mode }}
           AS_OF: ${{ github.event.inputs.as_of_override }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DEBUG_CRON_SECRET: ${{ secrets.DEBUG_CRON_SECRET }}
         run: |
-          if [ "$MODE" = "force_last_day_test" ]; then
+          set -euo pipefail
+
+          # Use the exact function URL you provided (Supabase gateway form)
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/cron-tenant-statements-monthly-email"
+
+          echo "Calling: ${URL}"
+          echo "Mode: ${MODE:-normal}"
+          echo "As-of override: ${AS_OF:-}"
+
+          if [[ "${MODE:-normal}" == "force_last_day_test" ]]; then
             echo "Running in FORCE LAST DAY (TEST) mode"
-            curl -sS -X POST "${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}/cron-tenant-statements-monthly-email" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
-              -H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}" \
+            PAYLOAD="{\"force_last_day\":true,\"as_of_override\":\"${AS_OF:-}\"}"
+
+            HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" \
+              -X POST "${URL}" \
+              -H "x-cron-secret: ${CRON_SECRET}" \
+              -H "x-debug-cron-secret: ${DEBUG_CRON_SECRET}" \
               -H "Content-Type: application/json" \
-              --data "{\"force_last_day\": true, \"as_of_override\": \"${AS_OF}\"}"
+              --data "${PAYLOAD}" || true)
           else
             echo "Running in NORMAL mode"
-            curl -sS -X POST "${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}/cron-tenant-statements-monthly-email" \
-              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" \
+              -X POST "${URL}" \
+              -H "x-cron-secret: ${CRON_SECRET}" \
               -H "Content-Type: application/json" \
-              --data "{}"
+              --data '{}' || true)
+          fi
+
+          echo "HTTP: ${HTTP_CODE}"
+          echo "Response:"
+          cat response.json || true
+
+          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+            echo "Request failed"
+            exit 1
           fi

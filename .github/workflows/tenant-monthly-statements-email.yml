@@ -1,0 +1,42 @@
+name: Tenant Monthly Statements Email
+
+on:
+  schedule:
+    - cron: "5 15 * * *"  # daily; function decides last day (Nairobi)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        type: choice
+        options:
+          - normal
+          - force_last_day_test
+      as_of_override:
+        description: "Optional YYYY-MM-DD override (testing only)"
+        required: false
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Supabase Edge Function (Monthly Statements)
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          AS_OF: ${{ github.event.inputs.as_of_override }}
+        run: |
+          if [ "$MODE" = "force_last_day_test" ]; then
+            echo "Running in FORCE LAST DAY (TEST) mode"
+            curl -sS -X POST "${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}/cron-tenant-statements-monthly-email" \
+              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+              -H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}" \
+              -H "Content-Type: application/json" \
+              --data "{\"force_last_day\": true, \"as_of_override\": \"${AS_OF}\"}"
+          else
+            echo "Running in NORMAL mode"
+            curl -sS -X POST "${{ secrets.SUPABASE_FUNCTIONS_BASE_URL }}/cron-tenant-statements-monthly-email" \
+              -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+              -H "Content-Type: application/json" \
+              --data "{}"
+          fi

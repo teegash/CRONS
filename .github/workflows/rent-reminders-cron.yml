@@ -2,14 +2,14 @@ name: Rent Reminders Cron
 
 on:
   schedule:
-    - cron: '5 0 * * *'    # 00:05 UTC — billing/status normalize
-    - cron: '20 0 * * *'   # 00:20 UTC — trigger reminders
-    - cron: '30 0 * * *'   # 00:30 UTC — dispatch reminders
-    - cron: '0 14 * * *'   # 14:00 UTC — dispatch retry / in-app second push
+    - cron: "5 0 * * *"    # 00:05 UTC — billing/status normalize
+    - cron: "20 0 * * *"   # 00:20 UTC — trigger reminders
+    - cron: "30 0 * * *"   # 00:30 UTC — dispatch reminders
+    - cron: "0 14 * * *"   # 14:00 UTC — dispatch retry / in-app second push
   workflow_dispatch:
     inputs:
       job:
-        description: 'Choose what to run'
+        description: "Choose what to run"
         required: true
         type: choice
         options:
@@ -17,6 +17,21 @@ on:
           - trigger
           - dispatch-0030
           - dispatch-1400
+      dry_run:
+        description: "If true, do not send SMS / do not write communications (dispatcher only)"
+        required: false
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      now_override:
+        description: "Dispatcher test only. ISO datetime or YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_NOW_OVERRIDE=true in Supabase."
+        required: false
+        type: string
+      limit:
+        description: "Dispatcher batch limit (1..500). Default 200."
+        required: false
+        type: string
+        default: "200"
 
 jobs:
   run:
@@ -27,6 +42,8 @@ jobs:
         id: mode
         shell: bash
         run: |
+          set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
             exit 0
@@ -55,110 +72,200 @@ jobs:
           echo "mode=unknown" >> "$GITHUB_OUTPUT"
 
       - name: Print mode
-        run: echo "Mode is ${{ steps.mode.outputs.mode }}"
-
-      - name: Ensure CRON_SECRET is set
         shell: bash
         run: |
+          echo "Mode is: ${{ steps.mode.outputs.mode }}"
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+
+      - name: Ensure required secrets are set
+        shell: bash
+        run: |
+          set -euo pipefail
+
           if [ -z "${{ secrets.CRON_SECRET }}" ]; then
             echo "ERROR: GitHub Actions secret CRON_SECRET is not set."
-            echo "Fix: Repo Settings -> Secrets and variables -> Actions -> New repository secret"
             exit 1
           fi
-          echo "CRON_SECRET is set (value hidden)."
 
+          # DEBUG_CRON_SECRET is only required for workflow_dispatch overrides
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.now_override }}" != "" ] || [ "${{ inputs.dry_run }}" = "true" ]; then
+              if [ -z "${{ secrets.DEBUG_CRON_SECRET }}" ]; then
+                echo "ERROR: DEBUG_CRON_SECRET is required for now_override / dry_run runs."
+                echo "Add GitHub Actions secret DEBUG_CRON_SECRET to match Supabase DEBUG_CRON_SECRET."
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "Secrets check OK."
+
+      # -----------------------------
+      # 1) billing-status
+      # -----------------------------
       - name: Billing status (normalize invoice statuses)
         if: steps.mode.outputs.mode == 'billing-status'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
           echo "Calling: $URL"
 
-          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
             -d '{}')
 
-          echo "HTTP $http_code"
+          echo "HTTP $HTTP_CODE"
           echo "Response:"
           cat response.json || true
           echo ""
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      - name: Trigger reminders
+      # -----------------------------
+      # 2) reminders-trigger (scheduler)
+      # -----------------------------
+      - name: Trigger reminders (create reminders from invoices)
         if: steps.mode.outputs.mode == 'trigger'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
           echo "Calling: $URL"
 
-          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
             -d '{}')
 
-          echo "HTTP $http_code"
+          echo "HTTP $HTTP_CODE"
           echo "Response:"
           cat response.json || true
           echo ""
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      - name: Dispatch reminders 0030
+      # -----------------------------
+      # 3) reminders-dispatch (00:30)
+      # -----------------------------
+      - name: Dispatch reminders (00:30 slot)
         if: steps.mode.outputs.mode == 'dispatch-0030'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
           echo "Calling: $URL"
 
-          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+          # Default payload for scheduled runs (no overrides)
+          PAYLOAD='{"limit":200}'
+
+          # For workflow_dispatch: allow dry_run/now_override
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            LIMIT="${{ inputs.limit }}"
+            if [ -z "$LIMIT" ]; then LIMIT="200"; fi
+
+            DRY="${{ inputs.dry_run }}"
+            NOW="${{ inputs.now_override }}"
+
+            # Build JSON manually (safe enough for these inputs)
+            if [ "$DRY" = "true" ] && [ "$NOW" != "" ]; then
+              PAYLOAD="{\"dry_run\":true,\"now_override\":\"$NOW\",\"limit\":$LIMIT}"
+            elif [ "$DRY" = "true" ]; then
+              PAYLOAD="{\"dry_run\":true,\"limit\":$LIMIT}"
+            elif [ "$NOW" != "" ]; then
+              PAYLOAD="{\"now_override\":\"$NOW\",\"limit\":$LIMIT}"
+            else
+              PAYLOAD="{\"limit\":$LIMIT}"
+            fi
+          fi
+
+          echo "Payload: $PAYLOAD"
+
+          # Add debug header only when payload uses override/dry_run
+          DEBUG_HEADER=()
+          if echo "$PAYLOAD" | grep -qE '"dry_run":true|"now_override":'; then
+            DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
+          fi
+
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}')
+            "${DEBUG_HEADER[@]}" \
+            --data "$PAYLOAD")
 
-          echo "HTTP $http_code"
+          echo "HTTP $HTTP_CODE"
           echo "Response:"
           cat response.json || true
           echo ""
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      - name: Dispatch reminders 1400
+      # -----------------------------
+      # 4) reminders-dispatch (14:00)
+      # -----------------------------
+      - name: Dispatch reminders (14:00 slot)
         if: steps.mode.outputs.mode == 'dispatch-1400'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
           echo "Calling: $URL"
 
-          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
+          # Same dispatcher endpoint; it will pick up due reminders <= now
+          PAYLOAD='{"limit":200}'
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            LIMIT="${{ inputs.limit }}"
+            if [ -z "$LIMIT" ]; then LIMIT="200"; fi
+
+            DRY="${{ inputs.dry_run }}"
+            NOW="${{ inputs.now_override }}"
+
+            if [ "$DRY" = "true" ] && [ "$NOW" != "" ]; then
+              PAYLOAD="{\"dry_run\":true,\"now_override\":\"$NOW\",\"limit\":$LIMIT}"
+            elif [ "$DRY" = "true" ]; then
+              PAYLOAD="{\"dry_run\":true,\"limit\":$LIMIT}"
+            elif [ "$NOW" != "" ]; then
+              PAYLOAD="{\"now_override\":\"$NOW\",\"limit\":$LIMIT}"
+            else
+              PAYLOAD="{\"limit\":$LIMIT}"
+            fi
+          fi
+
+          echo "Payload: $PAYLOAD"
+
+          DEBUG_HEADER=()
+          if echo "$PAYLOAD" | grep -qE '"dry_run":true|"now_override":'; then
+            DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
+          fi
+
+          HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}')
+            "${DEBUG_HEADER[@]}" \
+            --data "$PAYLOAD")
 
-          echo "HTTP $http_code"
+          echo "HTTP $HTTP_CODE"
           echo "Response:"
           cat response.json || true
           echo ""
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
@@ -167,6 +274,7 @@ jobs:
         if: steps.mode.outputs.mode == 'unknown'
         shell: bash
         run: |
+          set -euo pipefail
           echo "ERROR: Unknown schedule mapping."
           echo "github.event.schedule was: ${{ github.event.schedule }}"
           exit 1

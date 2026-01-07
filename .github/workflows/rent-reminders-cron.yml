@@ -6,6 +6,7 @@ on:
     - cron: "20 0 * * *"   # 00:20 UTC — trigger reminders
     - cron: "30 0 * * *"   # 00:30 UTC — dispatch reminders
     - cron: "0 14 * * *"   # 14:00 UTC — dispatch retry / in-app second push
+
   workflow_dispatch:
     inputs:
       job:
@@ -17,18 +18,33 @@ on:
           - trigger
           - dispatch-0030
           - dispatch-1400
+
+      # -------- Trigger testing --------
+      today_override:
+        description: "Trigger test only. YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_TODAY_OVERRIDE=true in Supabase."
+        required: false
+        type: string
+      trigger_dry_run:
+        description: "Trigger test only. If true, computes matches but does not write reminders (requires DEBUG_CRON_SECRET)."
+        required: false
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+      # -------- Dispatch testing --------
       dry_run:
-        description: "If true, do not send SMS / do not write communications (dispatcher only)"
+        description: "Dispatch test only. If true, do not send SMS / do not write communications (requires DEBUG_CRON_SECRET)."
         required: false
         type: choice
         options: ["false", "true"]
         default: "false"
       now_override:
-        description: "Dispatcher test only. ISO datetime or YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_NOW_OVERRIDE=true in Supabase."
+        description: "Dispatch test only. ISO datetime or YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_NOW_OVERRIDE=true in Supabase."
         required: false
         type: string
+
       limit:
-        description: "Dispatcher batch limit (1..500). Default 200."
+        description: "Dispatch batch limit (1..500). Default 200."
         required: false
         type: string
         default: "200"
@@ -77,6 +93,11 @@ jobs:
           echo "Mode is: ${{ steps.mode.outputs.mode }}"
           echo "Event: ${{ github.event_name }}"
           echo "Schedule: ${{ github.event.schedule }}"
+          echo "Trigger today_override: '${{ inputs.today_override }}'"
+          echo "Trigger trigger_dry_run: '${{ inputs.trigger_dry_run }}'"
+          echo "Dispatch now_override: '${{ inputs.now_override }}'"
+          echo "Dispatch dry_run: '${{ inputs.dry_run }}'"
+          echo "Dispatch limit: '${{ inputs.limit }}'"
 
       - name: Ensure required secrets are set
         shell: bash
@@ -88,11 +109,18 @@ jobs:
             exit 1
           fi
 
-          # DEBUG_CRON_SECRET is only required for workflow_dispatch overrides
+          # DEBUG_CRON_SECRET required if using ANY override/dry_run features
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.now_override }}" != "" ] || [ "${{ inputs.dry_run }}" = "true" ]; then
+            NEED_DEBUG="false"
+
+            if [ "${{ inputs.today_override }}" != "" ]; then NEED_DEBUG="true"; fi
+            if [ "${{ inputs.trigger_dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
+            if [ "${{ inputs.now_override }}" != "" ]; then NEED_DEBUG="true"; fi
+            if [ "${{ inputs.dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
+
+            if [ "$NEED_DEBUG" = "true" ]; then
               if [ -z "${{ secrets.DEBUG_CRON_SECRET }}" ]; then
-                echo "ERROR: DEBUG_CRON_SECRET is required for now_override / dry_run runs."
+                echo "ERROR: DEBUG_CRON_SECRET is required for override/dry_run runs."
                 echo "Add GitHub Actions secret DEBUG_CRON_SECRET to match Supabase DEBUG_CRON_SECRET."
                 exit 1
               fi
@@ -139,11 +167,38 @@ jobs:
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
           echo "Calling: $URL"
 
+          # Default payload for scheduled runs
+          PAYLOAD='{}'
+
+          # For workflow_dispatch: allow today_override + trigger_dry_run
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TODAY="${{ inputs.today_override }}"
+            TDRY="${{ inputs.trigger_dry_run }}"
+
+            if [ "$TDRY" = "true" ] && [ "$TODAY" != "" ]; then
+              PAYLOAD="{\"today_override\":\"$TODAY\",\"dry_run\":true}"
+            elif [ "$TDRY" = "true" ]; then
+              PAYLOAD="{\"dry_run\":true}"
+            elif [ "$TODAY" != "" ]; then
+              PAYLOAD="{\"today_override\":\"$TODAY\"}"
+            else
+              PAYLOAD="{}"
+            fi
+          fi
+
+          echo "Payload: $PAYLOAD"
+
+          DEBUG_HEADER=()
+          if echo "$PAYLOAD" | grep -qE '"today_override":|"dry_run":true'; then
+            DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
+          fi
+
           HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            -d '{}')
+            "${DEBUG_HEADER[@]}" \
+            --data "$PAYLOAD")
 
           echo "HTTP $HTTP_CODE"
           echo "Response:"
@@ -166,10 +221,8 @@ jobs:
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
           echo "Calling: $URL"
 
-          # Default payload for scheduled runs (no overrides)
           PAYLOAD='{"limit":200}'
 
-          # For workflow_dispatch: allow dry_run/now_override
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             LIMIT="${{ inputs.limit }}"
             if [ -z "$LIMIT" ]; then LIMIT="200"; fi
@@ -177,7 +230,6 @@ jobs:
             DRY="${{ inputs.dry_run }}"
             NOW="${{ inputs.now_override }}"
 
-            # Build JSON manually (safe enough for these inputs)
             if [ "$DRY" = "true" ] && [ "$NOW" != "" ]; then
               PAYLOAD="{\"dry_run\":true,\"now_override\":\"$NOW\",\"limit\":$LIMIT}"
             elif [ "$DRY" = "true" ]; then
@@ -191,7 +243,6 @@ jobs:
 
           echo "Payload: $PAYLOAD"
 
-          # Add debug header only when payload uses override/dry_run
           DEBUG_HEADER=()
           if echo "$PAYLOAD" | grep -qE '"dry_run":true|"now_override":'; then
             DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
@@ -225,7 +276,6 @@ jobs:
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
           echo "Calling: $URL"
 
-          # Same dispatcher endpoint; it will pick up due reminders <= now
           PAYLOAD='{"limit":200}'
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then

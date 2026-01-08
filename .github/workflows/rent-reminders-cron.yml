@@ -58,52 +58,21 @@ on:
         type: string
         default: "200"
 
+env:
+  SUPABASE_PROJECT_REF: bqcqacqchyrjckrapcar
+  BASE_URL: https://bqcqacqchyrjckrapcar.supabase.co/functions/v1
+
 jobs:
-  run:
+  # -----------------------------
+  # Common secret validation
+  # -----------------------------
+  secrets-check:
     runs-on: ubuntu-latest
-
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
     steps:
-      - name: Set mode
-        id: mode
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event.schedule }}" = "5 0 * * *" ]; then
-            echo "mode=billing-status" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event.schedule }}" = "20 0 * * *" ]; then
-            echo "mode=trigger" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
-            echo "mode=dispatch-0030" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${{ github.event.schedule }}" = "0 14 * * *" ]; then
-            echo "mode=dispatch-1400" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "mode=unknown" >> "$GITHUB_OUTPUT"
-
-      - name: Print mode
-        shell: bash
-        run: |
-          echo "Mode is: ${{ steps.mode.outputs.mode }}"
-          echo "Event: ${{ github.event_name }}"
-          echo "Schedule: ${{ github.event.schedule }}"
-          echo "Trigger today_override: '${{ inputs.today_override }}'"
-          echo "Trigger trigger_dry_run: '${{ inputs.trigger_dry_run }}'"
-          echo "Trigger force_send_now: '${{ inputs.force_send_now }}'"
-          echo "Dispatch now_override: '${{ inputs.now_override }}'"
-          echo "Dispatch dry_run: '${{ inputs.dry_run }}'"
-          echo "Dispatch limit: '${{ inputs.limit }}'"
-
       - name: Ensure required secrets are set
+        id: check
         shell: bash
         run: |
           set -euo pipefail
@@ -112,76 +81,106 @@ jobs:
             exit 1
           fi
 
-          # DEBUG_CRON_SECRET required if using ANY override/dry_run/force_send_now features
+          # For workflow_dispatch: require DEBUG_CRON_SECRET when overrides/dry_run/force_send_now used
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NEED_DEBUG="false"
-
             if [ "${{ inputs.today_override }}" != "" ]; then NEED_DEBUG="true"; fi
             if [ "${{ inputs.trigger_dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
             if [ "${{ inputs.force_send_now }}" = "true" ]; then NEED_DEBUG="true"; fi
-
             if [ "${{ inputs.now_override }}" != "" ]; then NEED_DEBUG="true"; fi
             if [ "${{ inputs.dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
 
-            if [ "$NEED_DEBUG" = "true" ]; then
-              if [ -z "${{ secrets.DEBUG_CRON_SECRET }}" ]; then
-                echo "ERROR: DEBUG_CRON_SECRET is required for override/dry_run/force_send_now runs."
-                echo "Add GitHub Actions secret DEBUG_CRON_SECRET to match Supabase DEBUG_CRON_SECRET."
-                exit 1
-              fi
+            if [ "$NEED_DEBUG" = "true" ] && [ -z "${{ secrets.DEBUG_CRON_SECRET }}" ]; then
+              echo "ERROR: DEBUG_CRON_SECRET is required for override/dry_run/force_send_now runs."
+              echo "Add GitHub Actions secret DEBUG_CRON_SECRET to match Supabase DEBUG_CRON_SECRET."
+              exit 1
             fi
           fi
 
+          echo "ok=true" >> "$GITHUB_OUTPUT"
           echo "Secrets check OK."
 
-      # -----------------------------
-      # 1) billing-status
-      # -----------------------------
+  # -----------------------------
+  # 1) billing-status
+  # -----------------------------
+  billing-status:
+    needs: [secrets-check]
+    runs-on: ubuntu-latest
+    if: |
+      needs.secrets-check.outputs.ok == 'true' &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '5 0 * * *') ||
+        (github.event_name == 'workflow_dispatch' && inputs.job == 'billing-status')
+      )
+    steps:
+      - name: Print context
+        shell: bash
+        run: |
+          echo "Running billing-status"
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+
       - name: Billing status (normalize invoice statuses)
-        if: steps.mode.outputs.mode == 'billing-status'
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
+          URL="${{ env.BASE_URL }}/billing-status"
           echo "Calling: $URL"
+
           HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
             -d '{}')
+
           echo "HTTP $HTTP_CODE"
-          echo "Response:"
           cat response.json || true
           echo ""
+
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      # -----------------------------
-      # 2) reminders-trigger (scheduler)
-      # -----------------------------
+  # -----------------------------
+  # 2) reminders-trigger (scheduler)
+  # -----------------------------
+  trigger:
+    needs: [secrets-check]
+    runs-on: ubuntu-latest
+    if: |
+      needs.secrets-check.outputs.ok == 'true' &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '20 0 * * *') ||
+        (github.event_name == 'workflow_dispatch' && inputs.job == 'trigger')
+      )
+    steps:
+      - name: Print context
+        shell: bash
+        run: |
+          echo "Running trigger"
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+          echo "today_override: '${{ inputs.today_override }}'"
+          echo "trigger_dry_run: '${{ inputs.trigger_dry_run }}'"
+          echo "force_send_now: '${{ inputs.force_send_now }}'"
+
       - name: Trigger reminders (create reminders from invoices)
-        if: steps.mode.outputs.mode == 'trigger'
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-trigger"
+
+          URL="${{ env.BASE_URL }}/reminders-trigger"
           echo "Calling: $URL"
 
-          # Default payload for scheduled runs
           PAYLOAD='{}'
 
-          # For workflow_dispatch: allow today_override + trigger_dry_run + force_send_now
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TODAY="${{ inputs.today_override }}"
             TDRY="${{ inputs.trigger_dry_run }}"
             FSEND="${{ inputs.force_send_now }}"
 
-            # Build JSON payload safely and explicitly
-            # Cases:
-            # - any combination of TODAY, TDRY(true), FSEND(true)
-            # - if none set => {}
+            # Build payload
             PAYLOAD="{"
             FIRST="true"
 
@@ -201,15 +200,10 @@ jobs:
             fi
 
             PAYLOAD="$PAYLOAD}"
-            # Normalize empty object
-            if [ "$PAYLOAD" = "{}" ]; then
-              PAYLOAD="{}"
-            fi
           fi
 
           echo "Payload: $PAYLOAD"
 
-          # Add debug header if payload uses gated debug flags
           DEBUG_HEADER=()
           if echo "$PAYLOAD" | grep -qE '"today_override":|"dry_run":true|"force_send_now":true'; then
             DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
@@ -223,31 +217,52 @@ jobs:
             --data "$PAYLOAD")
 
           echo "HTTP $HTTP_CODE"
-          echo "Response:"
           cat response.json || true
           echo ""
+
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      # -----------------------------
-      # 3) reminders-dispatch (00:30)
-      # -----------------------------
+  # -----------------------------
+  # 3) reminders-dispatch (00:30)
+  # -----------------------------
+  dispatch-0030:
+    needs: [secrets-check]
+    runs-on: ubuntu-latest
+    if: |
+      needs.secrets-check.outputs.ok == 'true' &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '30 0 * * *') ||
+        (github.event_name == 'workflow_dispatch' && inputs.job == 'dispatch-0030')
+      )
+    steps:
+      - name: Print context
+        shell: bash
+        run: |
+          echo "Running dispatch-0030"
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+          echo "now_override: '${{ inputs.now_override }}'"
+          echo "dry_run: '${{ inputs.dry_run }}'"
+          echo "limit: '${{ inputs.limit }}'"
+
       - name: Dispatch reminders (00:30 slot)
-        if: steps.mode.outputs.mode == 'dispatch-0030'
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+
+          URL="${{ env.BASE_URL }}/reminders-dispatch"
           echo "Calling: $URL"
 
-          PAYLOAD='{"limit":200}'
+          LIMIT="${{ inputs.limit }}"
+          if [ -z "$LIMIT" ]; then LIMIT="200"; fi
+
+          # Default scheduled run payload
+          PAYLOAD="{\"limit\":200}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            LIMIT="${{ inputs.limit }}"
-            if [ -z "$LIMIT" ]; then LIMIT="200"; fi
-
             DRY="${{ inputs.dry_run }}"
             NOW="${{ inputs.now_override }}"
 
@@ -277,31 +292,52 @@ jobs:
             --data "$PAYLOAD")
 
           echo "HTTP $HTTP_CODE"
-          echo "Response:"
           cat response.json || true
           echo ""
+
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
 
-      # -----------------------------
-      # 4) reminders-dispatch (14:00)
-      # -----------------------------
+  # -----------------------------
+  # 4) reminders-dispatch (14:00)
+  # -----------------------------
+  dispatch-1400:
+    needs: [secrets-check]
+    runs-on: ubuntu-latest
+    if: |
+      needs.secrets-check.outputs.ok == 'true' &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '0 14 * * *') ||
+        (github.event_name == 'workflow_dispatch' && inputs.job == 'dispatch-1400')
+      )
+    steps:
+      - name: Print context
+        shell: bash
+        run: |
+          echo "Running dispatch-1400"
+          echo "Event: ${{ github.event_name }}"
+          echo "Schedule: ${{ github.event.schedule }}"
+          echo "now_override: '${{ inputs.now_override }}'"
+          echo "dry_run: '${{ inputs.dry_run }}'"
+          echo "limit: '${{ inputs.limit }}'"
+
       - name: Dispatch reminders (14:00 slot)
-        if: steps.mode.outputs.mode == 'dispatch-1400'
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/reminders-dispatch"
+
+          URL="${{ env.BASE_URL }}/reminders-dispatch"
           echo "Calling: $URL"
 
-          PAYLOAD='{"limit":200}'
+          LIMIT="${{ inputs.limit }}"
+          if [ -z "$LIMIT" ]; then LIMIT="200"; fi
+
+          # Default scheduled run payload
+          PAYLOAD="{\"limit\":200}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            LIMIT="${{ inputs.limit }}"
-            if [ -z "$LIMIT" ]; then LIMIT="200"; fi
-
             DRY="${{ inputs.dry_run }}"
             NOW="${{ inputs.now_override }}"
 
@@ -331,19 +367,10 @@ jobs:
             --data "$PAYLOAD")
 
           echo "HTTP $HTTP_CODE"
-          echo "Response:"
           cat response.json || true
           echo ""
+
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
           fi
-
-      - name: Unknown mode guard
-        if: steps.mode.outputs.mode == 'unknown'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "ERROR: Unknown schedule mapping."
-          echo "github.event.schedule was: ${{ github.event.schedule }}"
-          exit 1

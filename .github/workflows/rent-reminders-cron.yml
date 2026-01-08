@@ -24,8 +24,16 @@ on:
         description: "Trigger test only. YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_TODAY_OVERRIDE=true in Supabase."
         required: false
         type: string
+
       trigger_dry_run:
         description: "Trigger test only. If true, computes matches but does not write reminders (requires DEBUG_CRON_SECRET)."
+        required: false
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+      force_send_now:
+        description: "Trigger test only. If true, schedules reminders for immediate dispatch (requires DEBUG_CRON_SECRET + ALLOW_TODAY_OVERRIDE=true in Supabase)."
         required: false
         type: choice
         options: ["false", "true"]
@@ -38,6 +46,7 @@ on:
         type: choice
         options: ["false", "true"]
         default: "false"
+
       now_override:
         description: "Dispatch test only. ISO datetime or YYYY-MM-DD. Requires DEBUG_CRON_SECRET + ALLOW_NOW_OVERRIDE=true in Supabase."
         required: false
@@ -59,32 +68,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "mode=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           if [ "${{ github.event.schedule }}" = "5 0 * * *" ]; then
             echo "mode=billing-status" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           if [ "${{ github.event.schedule }}" = "20 0 * * *" ]; then
             echo "mode=trigger" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           if [ "${{ github.event.schedule }}" = "30 0 * * *" ]; then
             echo "mode=dispatch-0030" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           if [ "${{ github.event.schedule }}" = "0 14 * * *" ]; then
             echo "mode=dispatch-1400" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           echo "mode=unknown" >> "$GITHUB_OUTPUT"
 
       - name: Print mode
@@ -95,6 +98,7 @@ jobs:
           echo "Schedule: ${{ github.event.schedule }}"
           echo "Trigger today_override: '${{ inputs.today_override }}'"
           echo "Trigger trigger_dry_run: '${{ inputs.trigger_dry_run }}'"
+          echo "Trigger force_send_now: '${{ inputs.force_send_now }}'"
           echo "Dispatch now_override: '${{ inputs.now_override }}'"
           echo "Dispatch dry_run: '${{ inputs.dry_run }}'"
           echo "Dispatch limit: '${{ inputs.limit }}'"
@@ -103,24 +107,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           if [ -z "${{ secrets.CRON_SECRET }}" ]; then
             echo "ERROR: GitHub Actions secret CRON_SECRET is not set."
             exit 1
           fi
 
-          # DEBUG_CRON_SECRET required if using ANY override/dry_run features
+          # DEBUG_CRON_SECRET required if using ANY override/dry_run/force_send_now features
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NEED_DEBUG="false"
 
             if [ "${{ inputs.today_override }}" != "" ]; then NEED_DEBUG="true"; fi
             if [ "${{ inputs.trigger_dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
+            if [ "${{ inputs.force_send_now }}" = "true" ]; then NEED_DEBUG="true"; fi
+
             if [ "${{ inputs.now_override }}" != "" ]; then NEED_DEBUG="true"; fi
             if [ "${{ inputs.dry_run }}" = "true" ]; then NEED_DEBUG="true"; fi
 
             if [ "$NEED_DEBUG" = "true" ]; then
               if [ -z "${{ secrets.DEBUG_CRON_SECRET }}" ]; then
-                echo "ERROR: DEBUG_CRON_SECRET is required for override/dry_run runs."
+                echo "ERROR: DEBUG_CRON_SECRET is required for override/dry_run/force_send_now runs."
                 echo "Add GitHub Actions secret DEBUG_CRON_SECRET to match Supabase DEBUG_CRON_SECRET."
                 exit 1
               fi
@@ -139,18 +144,15 @@ jobs:
           set -euo pipefail
           URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/billing-status"
           echo "Calling: $URL"
-
           HTTP_CODE=$(curl -sS -o response.json -w "%{http_code}" -X POST \
             "$URL" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
             -d '{}')
-
           echo "HTTP $HTTP_CODE"
           echo "Response:"
           cat response.json || true
           echo ""
-
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
@@ -170,26 +172,46 @@ jobs:
           # Default payload for scheduled runs
           PAYLOAD='{}'
 
-          # For workflow_dispatch: allow today_override + trigger_dry_run
+          # For workflow_dispatch: allow today_override + trigger_dry_run + force_send_now
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TODAY="${{ inputs.today_override }}"
             TDRY="${{ inputs.trigger_dry_run }}"
+            FSEND="${{ inputs.force_send_now }}"
 
-            if [ "$TDRY" = "true" ] && [ "$TODAY" != "" ]; then
-              PAYLOAD="{\"today_override\":\"$TODAY\",\"dry_run\":true}"
-            elif [ "$TDRY" = "true" ]; then
-              PAYLOAD="{\"dry_run\":true}"
-            elif [ "$TODAY" != "" ]; then
-              PAYLOAD="{\"today_override\":\"$TODAY\"}"
-            else
+            # Build JSON payload safely and explicitly
+            # Cases:
+            # - any combination of TODAY, TDRY(true), FSEND(true)
+            # - if none set => {}
+            PAYLOAD="{"
+            FIRST="true"
+
+            if [ "$TODAY" != "" ]; then
+              if [ "$FIRST" = "true" ]; then FIRST="false"; else PAYLOAD="$PAYLOAD,"; fi
+              PAYLOAD="$PAYLOAD\"today_override\":\"$TODAY\""
+            fi
+
+            if [ "$TDRY" = "true" ]; then
+              if [ "$FIRST" = "true" ]; then FIRST="false"; else PAYLOAD="$PAYLOAD,"; fi
+              PAYLOAD="$PAYLOAD\"dry_run\":true"
+            fi
+
+            if [ "$FSEND" = "true" ]; then
+              if [ "$FIRST" = "true" ]; then FIRST="false"; else PAYLOAD="$PAYLOAD,"; fi
+              PAYLOAD="$PAYLOAD\"force_send_now\":true"
+            fi
+
+            PAYLOAD="$PAYLOAD}"
+            # Normalize empty object
+            if [ "$PAYLOAD" = "{}" ]; then
               PAYLOAD="{}"
             fi
           fi
 
           echo "Payload: $PAYLOAD"
 
+          # Add debug header if payload uses gated debug flags
           DEBUG_HEADER=()
-          if echo "$PAYLOAD" | grep -qE '"today_override":|"dry_run":true'; then
+          if echo "$PAYLOAD" | grep -qE '"today_override":|"dry_run":true|"force_send_now":true'; then
             DEBUG_HEADER=(-H "x-debug-cron-secret: ${{ secrets.DEBUG_CRON_SECRET }}")
           fi
 
@@ -204,7 +226,6 @@ jobs:
           echo "Response:"
           cat response.json || true
           echo ""
-
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
@@ -259,7 +280,6 @@ jobs:
           echo "Response:"
           cat response.json || true
           echo ""
-
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1
@@ -314,7 +334,6 @@ jobs:
           echo "Response:"
           cat response.json || true
           echo ""
-
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Request failed"
             exit 1

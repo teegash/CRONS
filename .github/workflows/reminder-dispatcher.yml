@@ -105,7 +105,7 @@ jobs:
           echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
           echo "timeout=${TIMEOUT}" >> $GITHUB_OUTPUT
 
-      - name: Call Edge Function - reminder-dispatcher (fail on non-2xx)
+      - name: Call Edge Function - reminder-dispatcher (fail on non-2xx, prints status/body)
         shell: bash
         env:
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -120,23 +120,29 @@ jobs:
           echo "Payload: ${PAYLOAD}"
 
           BODY_FILE="$(mktemp)"
+          HTTP_FILE="$(mktemp)"
 
           # --fail-with-body:
-          # - fails the step on 400/500 responses
-          # - still prints response body (useful for debugging)
-          curl --fail-with-body -sS --max-time "${TIMEOUT}" \
+          # - fails on 4xx/5xx
+          # - preserves response body for debugging
+          if ! curl --fail-with-body -sS --max-time "${TIMEOUT}" \
             -o "${BODY_FILE}" \
+            -w "%{http_code}" > "${HTTP_FILE}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d "${PAYLOAD}"
+            -d "${PAYLOAD}"; then
+            HTTP_CODE="$(cat "${HTTP_FILE}" 2>/dev/null || echo "000")"
+            echo "HTTP status: ${HTTP_CODE}"
+            echo "Response body (raw):"
+            cat "${BODY_FILE}" || true
+            echo ""
+            echo "::error::Edge function call failed. HTTP ${HTTP_CODE}."
+            exit 1
+          fi
 
+          HTTP_CODE="$(cat "${HTTP_FILE}" 2>/dev/null || echo "000")"
+          echo "HTTP status: ${HTTP_CODE}"
           echo "Response body (raw):"
           cat "${BODY_FILE}" || true
           echo ""
-
-
-          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
-            echo "::error::Edge function call failed. HTTP ${HTTP_CODE}. See response body in logs."
-            exit 1
-          fi

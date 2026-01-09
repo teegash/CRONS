@@ -16,16 +16,21 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           EDGE_ENDPOINT_URL: https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/cron-expenses-recurring
         run: |
-          if [ -z "$CRON_SECRET" ]; then
+          set -euo pipefail
+
+          if [ -z "${CRON_SECRET:-}" ]; then
             echo "Missing secret: CRON_SECRET"
             exit 1
           fi
-          if [ -z "$EDGE_ENDPOINT_URL" ]; then
+
+          if [ -z "${EDGE_ENDPOINT_URL:-}" ]; then
             echo "Missing env: EDGE_ENDPOINT_URL"
             exit 1
           fi
 
-          curl -sS -X POST "$EDGE_ENDPOINT_URL" \
+          echo "Calling: $EDGE_ENDPOINT_URL"
+
+          curl --fail-with-body -sS -X POST "$EDGE_ENDPOINT_URL" \
             -H "x-cron-secret: ${CRON_SECRET}" \
             -H "Content-Type: application/json" \
             --data '{}' | tee /dev/stderr

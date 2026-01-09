@@ -1,0 +1,129 @@
+name: Monthly Rent Invoice Email Sender
+
+on:
+  schedule:
+    # 07:00 UTC = 10:00 Africa/Nairobi on the 1st day of every month
+    - cron: "0 7 1 * *"
+  workflow_dispatch:
+    inputs:
+      month_start_override:
+        description: "Override month start (YYYY-MM-DD), e.g. 2026-02-01"
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: "Limit number of leases processed (1-500)"
+        required: false
+        default: "200"
+        type: string
+      dry_run:
+        description: "If true, builds PDFs but does not send or record"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      timeout_seconds:
+        description: "HTTP call timeout seconds (10-300)"
+        required: false
+        default: "60"
+        type: string
+
+concurrency:
+  group: rent-invoice-monthly-email
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate secrets
+        shell: bash
+        env:
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SRK:-}" ]; then
+            echo "::error::Missing SUPABASE_SERVICE_ROLE_KEY secret."
+            exit 1
+          fi
+          echo "SUPABASE_SERVICE_ROLE_KEY length: ${#SRK}"
+
+      - name: Build payload
+        id: payload
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MONTH: ${{ inputs.month_start_override }}
+          INPUT_LIMIT: ${{ inputs.limit }}
+          INPUT_DRY: ${{ inputs.dry_run }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -euo pipefail
+
+          MONTH=""
+          LIMIT="200"
+          DRY="false"
+          TIMEOUT="60"
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ -n "${INPUT_MONTH:-}" ]; then MONTH="${INPUT_MONTH}"; fi
+            if [ -n "${INPUT_LIMIT:-}" ]; then LIMIT="${INPUT_LIMIT}"; fi
+            if [ -n "${INPUT_DRY:-}" ]; then DRY="${INPUT_DRY}"; fi
+            if [ -n "${INPUT_TIMEOUT:-}" ]; then TIMEOUT="${INPUT_TIMEOUT}"; fi
+          fi
+
+          if ! [[ "${LIMIT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::limit must be numeric"
+            exit 1
+          fi
+          if [ "${LIMIT}" -lt 1 ] || [ "${LIMIT}" -gt 500 ]; then
+            echo "::error::limit out of range (1-500): ${LIMIT}"
+            exit 1
+          fi
+
+          if ! [[ "${TIMEOUT}" =~ ^[0-9]+$ ]]; then
+            echo "::error::timeout_seconds must be numeric"
+            exit 1
+          fi
+          if [ "${TIMEOUT}" -lt 10 ] || [ "${TIMEOUT}" -gt 300 ]; then
+            echo "::error::timeout_seconds out of range (10-300): ${TIMEOUT}"
+            exit 1
+          fi
+
+          # Build JSON payload
+          PAYLOAD="{\"limit\":${LIMIT},\"dryRun\":${DRY}}"
+          if [ -n "${MONTH}" ]; then
+            PAYLOAD="{\"monthStartOverride\":\"${MONTH}\",\"limit\":${LIMIT},\"dryRun\":${DRY}}"
+          fi
+
+          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
+          echo "timeout=${TIMEOUT}" >> $GITHUB_OUTPUT
+
+      - name: Call Edge Function - rent-invoice-monthly-email (fail on non-2xx)
+        shell: bash
+        env:
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PAYLOAD: ${{ steps.payload.outputs.payload }}
+          TIMEOUT: ${{ steps.payload.outputs.timeout }}
+        run: |
+          set -euo pipefail
+
+          URL="https://bqcqacqchyrjckrapcar.supabase.co/functions/v1/rent-invoice-monthly-email"
+          echo "Calling: ${URL}"
+          echo "Timeout: ${TIMEOUT}s"
+          echo "Payload: ${PAYLOAD}"
+
+          BODY_FILE="$(mktemp)"
+
+          # Use --fail-with-body so the job fails on 4xx/5xx while preserving body for debugging
+          curl --fail-with-body -sS --max-time "${TIMEOUT}" \
+            -o "${BODY_FILE}" \
+            -X POST "${URL}" \
+            -H "Authorization: Bearer ${SRK}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}"
+
+          echo "Response body (raw):"
+          cat "${BODY_FILE}" || true
+          echo ""

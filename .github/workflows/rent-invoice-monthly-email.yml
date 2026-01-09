@@ -35,6 +35,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Validate secrets
@@ -91,16 +92,24 @@ jobs:
             exit 1
           fi
 
+          # dry_run is a choice: "true"/"false" (already validated by GitHub UI)
           # Build JSON payload
-          PAYLOAD="{\"limit\":${LIMIT},\"dryRun\":${DRY}}"
           if [ -n "${MONTH}" ]; then
             PAYLOAD="{\"monthStartOverride\":\"${MONTH}\",\"limit\":${LIMIT},\"dryRun\":${DRY}}"
+          else
+            PAYLOAD="{\"limit\":${LIMIT},\"dryRun\":${DRY}}"
           fi
 
-          echo "payload=${PAYLOAD}" >> $GITHUB_OUTPUT
-          echo "timeout=${TIMEOUT}" >> $GITHUB_OUTPUT
+          echo "Final MONTH='${MONTH}'"
+          echo "Final LIMIT=${LIMIT}"
+          echo "Final DRY=${DRY}"
+          echo "Final TIMEOUT=${TIMEOUT}"
+          echo "Final PAYLOAD=${PAYLOAD}"
 
-      - name: Call Edge Function - rent-invoice-monthly-email (fail on non-2xx)
+          echo "payload=${PAYLOAD}" >> "$GITHUB_OUTPUT"
+          echo "timeout=${TIMEOUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Call Edge Function - rent-invoice-monthly-email (always prints status/body)
         shell: bash
         env:
           SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -116,14 +125,25 @@ jobs:
 
           BODY_FILE="$(mktemp)"
 
-          # Use --fail-with-body so the job fails on 4xx/5xx while preserving body for debugging
-          curl --fail-with-body -sS --max-time "${TIMEOUT}" \
+          HTTP_CODE="$(curl -sS --max-time "${TIMEOUT}" \
             -o "${BODY_FILE}" \
+            -w "%{http_code}" \
             -X POST "${URL}" \
             -H "Authorization: Bearer ${SRK}" \
             -H "Content-Type: application/json" \
-            -d "${PAYLOAD}"
+            -d "${PAYLOAD}" || true)"
 
+          echo "HTTP status: ${HTTP_CODE}"
           echo "Response body (raw):"
           cat "${BODY_FILE}" || true
           echo ""
+
+          if [[ -z "${HTTP_CODE}" ]]; then
+            echo "::error::No HTTP status captured (curl failed unexpectedly)."
+            exit 1
+          fi
+
+          if [[ "${HTTP_CODE}" -lt 200 || "${HTTP_CODE}" -ge 300 ]]; then
+            echo "::error::Edge function call failed. HTTP ${HTTP_CODE}. See response body above."
+            exit 1
+          fi

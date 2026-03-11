@@ -2,7 +2,7 @@ name: M-Pesa Auto Verify
 
 on:
   schedule:
-    # every 2 minutes
+    # every 2 minutes in Kenya
     - cron: "*/2 * * * *"
   workflow_dispatch: {}
 

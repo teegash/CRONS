@@ -2,7 +2,7 @@ name: Rent Reminders Cron
 
 on:
   schedule:
-    - cron: "5 0 * * *"    # 00:05 UTC — billing/status normalize
+    - cron: "5 0 * * *"    # 00:05 UTC — billing/status normalize in Kenya
     - cron: "20 0 * * *"   # 00:20 UTC — trigger reminders
     - cron: "30 0 * * *"   # 00:30 UTC — dispatch reminders
     - cron: "0 14 * * *"   # 14:00 UTC — dispatch retry / in-app second push

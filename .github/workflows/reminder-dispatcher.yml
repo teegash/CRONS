@@ -1,5 +1,6 @@
 name: Reminder Dispatcher
 
+# in Kenya
 on:
   schedule:
     - cron: "*/10 * * * *"

@@ -2,7 +2,7 @@ name: Cron - Recurring Expenses
 
 on:
   schedule:
-    # Runs daily at 00:10 UTC (03:10 Africa/Kenya, Nai)
+    # Runs daily at 00:10 UTC (03:10 Africa/Kenya, Nairo)
     - cron: "10 0 * * *"
   workflow_dispatch: {}
 

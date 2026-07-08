@@ -2,7 +2,7 @@ name: M-Pesa Auto Verify
 
 on:
   schedule:
-    # every 2 minutes in Kenya, Nai
+    # every 2 minutes in Kenya, Nairo
     - cron: "*/2 * * * *"
   workflow_dispatch: {}
 

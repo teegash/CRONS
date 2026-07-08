@@ -2,7 +2,7 @@ name: Cron - Monthly Invoices
 
 on:
   schedule:
-    # 1st of every month at 00:00 UTC in Kenya, Nai
+    # 1st of every month at 00:00 UTC in Kenya, Nairo
     - cron: "0 0 1 * *"
   workflow_dispatch:
     inputs:

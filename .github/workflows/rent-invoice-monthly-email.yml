@@ -2,7 +2,7 @@ name: Monthly Rent Invoice Email Sender
 
 on:
   schedule:
-    # 07:00 UTC = 10:00 Africa/Kenya, Nai on the 1st day of every month
+    # 07:00 UTC = 10:00 Africa/Kenya, Nairo on the 1st day of every month
     - cron: "0 7 1 * *"
   workflow_dispatch:
     inputs:

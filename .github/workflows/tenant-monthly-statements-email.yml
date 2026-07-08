@@ -2,7 +2,7 @@ name: Tenant Monthly Statements Email
 
 on:
   schedule:
-    # 18:05 Nai Kenya = 15:05 UTC
+    # 18:05 Nairo Kenya = 15:05 UTC
     - cron: "5 15 * * *"
   workflow_dispatch:
     inputs:
